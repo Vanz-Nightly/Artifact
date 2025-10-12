@@ -37,4 +37,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: BoomingMusic-APK
-        path: src/[your-project-subfolder]/app/build/outputs/apk/debug/*.apk
+        path: src/[BoomingMusic-1.1.0-beta.8]/app/build/outputs/apk/debug/*.apk
