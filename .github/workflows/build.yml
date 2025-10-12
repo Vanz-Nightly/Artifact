@@ -30,7 +30,7 @@ jobs:
 
     - name: Build APK
       run: |
-        cd src/[your-project-subfolder]
+        cd src/[BoomingMusic-1.1.0-beta.8]
         gradle assembleDebug
 
     - name: Upload APK
