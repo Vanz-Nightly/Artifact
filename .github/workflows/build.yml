@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -17,19 +18,18 @@ jobs:
 
       - name: Unzip BoomingMusic archive
         run: |
-          mkdir source
-          unzip -q BoomingMusic-1.1.0-beta.8.zip -d source
-          # Move into the first directory that contains gradlew
-          set -e
+          mkdir -p source
+          unzip -q BoomingMusic-1.1.0-beta.8.zip -d source || (echo "Failed to unzip. File may be missing or name differs." && ls -la)
+          # Find folder that contains gradlew
           cd source
-          project_root=$(find . -maxdepth 2 -type f -name gradlew -printf '%h\n' | head -n 1)
-          if [ -z "$project_root" ]; then
-            echo "gradlew not found; listing source:"
+          GRADLEW_DIR=$(find . -maxdepth 3 -type f -name gradlew -print -quit | xargs -r dirname)
+          if [ -z "$GRADLEW_DIR" ]; then
+            echo "gradlew not found. Listing contents:"
             ls -R
             exit 1
           fi
-          echo "Using project root: $project_root"
-          cd "$project_root"
+          echo "Using project root: $GRADLEW_DIR"
+          cd "$GRADLEW_DIR"
           pwd
           ls -la
 
@@ -49,5 +49,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BoomingMusic-debug
-          path: app/build/outputs/apk/*
-          */*.apk
+          path: app/build/outputs/apk/
+          **/*.apk
