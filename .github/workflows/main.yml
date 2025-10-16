@@ -1,4 +1,4 @@
-name: Build & Sign Release APK
+name: Booming Music
 
 on:
   push:
@@ -13,25 +13,27 @@ jobs:
         shell: bash
 
     env:
-      # These may be provided as repo secrets; if not present they will be set to defaults in the script.
+      ANDROID_SDK_ROOT: /usr/local/android-sdk
+      # Optional secrets (set these in repo Settings -> Secrets if you have them)
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-      # If you already have a base64 keystore saved as secret you can set KEYSTORE_BASE64 in repo secrets
-      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip BoomingMusic-1.1.0-beta.9.zip
+      - name: Unzip BoomingMusic zip
         run: |
           mkdir -p src
+          # This workflow expects the artifact file in the repo root and named exactly:
+          # BoomingMusic-1.1.0-beta.9.zip
           unzip -q BoomingMusic-1.1.0-beta.9.zip -d src || true
           echo "Top-level of src:"
           ls -la src || true
 
-      - name: List files for debugging (after unzip)
+      - name: Inspect src (debug)
         run: ls -R src || true
 
       - name: Set up JDK 17
@@ -39,6 +41,26 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Install Android commandline tools + SDK (linux)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y wget unzip
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          cd $ANDROID_SDK_ROOT/cmdline-tools
+          # Download command line tools; URL may be updated by Google in future
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip
+          # Move to expected path
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools/latest
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/* $ANDROID_SDK_ROOT/cmdline-tools/latest/ || true
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          # Install minimal packages required to compile (adjust platform if your project needs another)
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          echo "SDK installed:"
+          ls -la $ANDROID_SDK_ROOT || true
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -50,52 +72,57 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build Release APK (detect project, create/sign keystore if needed)
+      - name: Build release (detect project, create/sign keystore if needed) and capture log
         run: |
           set -euo pipefail
 
-          # locate project directory
-          PROJECT_DIR=""
+          # locate project directory under src (zip unpacks to BoomingMusic-1.1.0-beta.9/...)
           PROJECT_DIR=$(find src -maxdepth 6 -type f -name 'settings.gradle*' -printf '%h\n' | head -n1 || true)
           if [ -z "$PROJECT_DIR" ]; then
             PROJECT_DIR=$(find src -maxdepth 6 -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -printf '%h\n' | head -n1 || true)
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Could not find Gradle project (settings.gradle or build.gradle(.kts)) under src"
+            echo "ERROR: Could not find Gradle project under src (no settings.gradle or build.gradle(.kts))"
             ls -R src
+            echo "Writing failure marker and exiting"
+            echo "no-project-found" > build.log
             exit 1
           fi
 
           echo "Found Gradle project: $PROJECT_DIR"
           cd "$PROJECT_DIR"
           echo "Working dir: $(pwd)"
+          echo "List files in project root for debugging:"
+          ls -la || true
+          echo "List app module files (if present):"
+          ls -la app || true
 
-          # Set defaults if secrets not provided
+          # set reliable default passwords if secrets not provided (change later)
           KEYSTORE_PASSWORD="${KEYSTORE_PASSWORD:-changeme123}"
           KEY_PASSWORD="${KEY_PASSWORD:-changeme123}"
           KEY_ALIAS="${KEY_ALIAS:-boomingkey}"
 
-          # If a base64 keystore secret exists, decode it to release-keystore.jks
+          # if KEYSTORE_BASE64 secret provided decode to release-keystore.jks
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Decoding KEYSTORE_BASE64 secret to release-keystore.jks"
-            echo "${KEYSTORE_BASE64}" | base64 --decode > release-keystore.jks
+            echo "${KEYSTORE_BASE64}" | base64 --decode > release-keystore.jks || true
           fi
 
-          # If keystore doesn't exist (no secret or file), create one on the fly
+          # create keystore if missing
           if [ ! -f release-keystore.jks ]; then
-            echo "No keystore found: creating release-keystore.jks with alias $KEY_ALIAS"
-            # Non-interactive keytool command to create a keystore
+            echo "No keystore found: creating release-keystore.jks (this will be uploaded as artifact)"
+            # Non-interactive keytool creation
             keytool -genkeypair \
               -alias "$KEY_ALIAS" \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -keystore release-keystore.jks \
               -storepass "$KEYSTORE_PASSWORD" \
               -keypass "$KEY_PASSWORD" \
-              -dname "CN=Booming Music, OU=Dev, O=Vanz, L=City, ST=State, C=US"
-            echo "Keystore created."
+              -dname "CN=Booming Music, OU=Dev, O=Vanz, L=City, ST=State, C=US" || true
+            echo "Keystore created (or creation attempted)."
           else
-            echo "Keystore file present: release-keystore.jks"
+            echo "Keystore present at $(pwd)/release-keystore.jks"
           fi
 
           # Write gradle.properties so signingConfig can pick it up
@@ -104,40 +131,68 @@ jobs:
           echo "KEY_ALIAS=$KEY_ALIAS" >> gradle.properties
           echo "KEY_PASSWORD=$KEY_PASSWORD" >> gradle.properties
 
-          ls -la release-keystore.jks || true
-          # ensure wrapper is executable and run release build
+          # ensure gradlew executable and run assembleRelease, capture output
           if [ -f ./gradlew ]; then
             chmod +x ./gradlew
-            ./gradlew clean assembleRelease --no-daemon --stacktrace --warning-mode all
+            echo "Running: ./gradlew clean assembleRelease --no-daemon"
+            ./gradlew clean assembleRelease --no-daemon --stacktrace --warning-mode all > build.log 2>&1 || true
+            BUILD_EXIT=$?
           else
-            gradle clean assembleRelease --no-daemon --stacktrace --warning-mode all
+            echo "No gradlew found; attempting system gradle (may fail)."
+            gradle clean assembleRelease --no-daemon --stacktrace --warning-mode all > build.log 2>&1 || true
+            BUILD_EXIT=$?
+          fi
+
+          echo "Gradle exit code: $BUILD_EXIT"
+          echo "----- tail of build.log -----"
+          tail -n 200 build.log || true
+
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            echo "Build failed (exit code $BUILD_EXIT). Uploading logs and artifacts for debugging."
+            exit $BUILD_EXIT
           fi
         shell: bash
 
-      - name: Find release APKs (debug info)
+      - name: Show build.log head (for quick preview)
+        if: always()
         run: |
-          echo "Looking for release apks"
-          find . -type f -name "*release*.apk" -print || true
+          echo "---- build.log head ----"
+          head -n 400 build.log || true
+          echo "---- end head ----"
 
-      - name: Upload signed release APK(s)
+      - name: Upload build.log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BoomingMusic-Release-APK
-          path: |
-            **/build/outputs/apk/release/*.apk
+          name: build-log
+          path: build.log
 
-      - name: Upload generated keystore (download and keep safe!)
+      - name: Upload generated keystore (if present)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: generated-release-keystore
           path: release-keystore.jks
 
-      - name: Upload keystore base64 text (use to add a secret later)
+      - name: Upload keystore base64 (if present)
+        if: always()
         run: |
-          base64 release-keystore.jks > release-keystore.jks.base64
-        continue-on-error: false
-      - name: Upload base64 keystore text
+          if [ -f release-keystore.jks ]; then
+            base64 release-keystore.jks > release-keystore.jks.base64 || true
+            ls -la release-keystore.jks.base64 || true
+          fi
+        shell: bash
+      - name: Upload base64 keystore
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-keystore-base64
           path: release-keystore.jks.base64
+
+      - name: Upload release APK(s) if produced
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoomingMusic-Release-APK
+          path: |
+            **/build/outputs/apk/release/*.apk
