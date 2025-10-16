@@ -1,4 +1,4 @@
-name: Build APK from BoomingMusic Zip
+name: Build Release APK
 
 on:
   push:
@@ -42,15 +42,15 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gradle-
 
-    - name: Build APK (auto-detect project dir, prefer wrapper)
+    - name: Build Release APK (auto-detect project dir, prefer wrapper)
       run: |
         set -euo pipefail
 
         # Try to locate the project root (settings.gradle(.kts) preferred, fallback to build.gradle(.kts))
         PROJECT_DIR=""
-        PROJECT_DIR=$(find src -maxdepth 4 -type f -name 'settings.gradle*' -printf '%h\n' | head -n1 || true)
+        PROJECT_DIR=$(find src -maxdepth 6 -type f -name 'settings.gradle*' -printf '%h\n' | head -n1 || true)
         if [ -z "$PROJECT_DIR" ]; then
-          PROJECT_DIR=$(find src -maxdepth 4 -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -printf '%h\n' | head -n1 || true)
+          PROJECT_DIR=$(find src -maxdepth 6 -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -printf '%h\n' | head -n1 || true)
         fi
 
         if [ -z "$PROJECT_DIR" ]; then
@@ -62,26 +62,34 @@ jobs:
         echo "Found Gradle project directory: $PROJECT_DIR"
         cd "$PROJECT_DIR"
         echo "Working directory: $(pwd)"
-        # make wrapper executable if present
-        if [ -f ./gradlew ]; then
-          echo "Using project Gradle wrapper (./gradlew)"
-          chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace --warning-mode all
-        else
-          echo "No gradlew wrapper found; falling back to system gradle (may not match project gradle version)"
-          gradle assembleDebug --no-daemon --stacktrace --warning-mode all
+
+        # Optional: If you put keystore into secrets as base64, decode it and set system properties for signing
+        if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ] 2>/dev/null; then
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > release-keystore.jks
+          echo "KEYSTORE_FILE=$(pwd)/release-keystore.jks" >> gradle.properties
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> gradle.properties
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> gradle.properties
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> gradle.properties
         fi
 
-    - name: List APKs for debugging (show any APKs produced)
+        # make wrapper executable if present
+        if [ -f ./gradlew ]; then
+          chmod +x ./gradlew
+          ./gradlew clean assembleRelease --no-daemon --stacktrace --warning-mode all
+        else
+          gradle clean assembleRelease --no-daemon --stacktrace --warning-mode all
+        fi
+
+    - name: List release APKs for debugging (show any APKs produced)
       run: |
-        echo "Searching for .apk files under src:"
-        find src -type f -name "*.apk" -print || true
+        echo "Searching for release .apk files under src:"
+        find src -type f -name "*release*.apk" -print || true
         echo "Listing build output directories for inspection:"
         find src -type d -path "*/build/outputs/*" -maxdepth 6 -print || true
 
-    - name: Upload any APKs produced
+    - name: Upload release APK(s)
       uses: actions/upload-artifact@v4
       with:
-        name: BoomingMusic-APK
+        name: BoomingMusic-Release-APK
         path: |
-          src/**/build/outputs/**/*.apk
+          src/**/build/outputs/apk/release/*.apk
