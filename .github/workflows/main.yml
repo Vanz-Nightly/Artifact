@@ -14,7 +14,6 @@ jobs:
 
     env:
       ANDROID_SDK_ROOT: /usr/local/android-sdk
-      # Optional secrets (set these in repo Settings -> Secrets if you have them)
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -27,8 +26,6 @@ jobs:
       - name: Unzip BoomingMusic zip
         run: |
           mkdir -p src
-          # This workflow expects the artifact file in the repo root and named exactly:
-          # BoomingMusic-1.1.0-beta.9.zip
           unzip -q BoomingMusic-1.1.0-beta.9.zip -d src || true
           echo "Top-level of src:"
           ls -la src || true
@@ -49,17 +46,14 @@ jobs:
           sudo apt-get install -y wget unzip
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
           cd $ANDROID_SDK_ROOT/cmdline-tools
-          # Download command line tools; URL may be updated by Google in future
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
           unzip -q cmdline-tools.zip
-          # Move to expected path
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools/latest
           mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/* $ANDROID_SDK_ROOT/cmdline-tools/latest/ || true
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          # Install minimal packages required to compile (adjust platform if your project needs another)
           $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
-          echo "SDK installed:"
+          echo "SDK installed (top-level):"
           ls -la $ANDROID_SDK_ROOT || true
 
       - name: Cache Gradle
@@ -76,7 +70,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # locate project directory under src (zip unpacks to BoomingMusic-1.1.0-beta.9/...)
           PROJECT_DIR=$(find src -maxdepth 6 -type f -name 'settings.gradle*' -printf '%h\n' | head -n1 || true)
           if [ -z "$PROJECT_DIR" ]; then
             PROJECT_DIR=$(find src -maxdepth 6 -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -printf '%h\n' | head -n1 || true)
@@ -85,7 +78,6 @@ jobs:
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Could not find Gradle project under src (no settings.gradle or build.gradle(.kts))"
             ls -R src
-            echo "Writing failure marker and exiting"
             echo "no-project-found" > build.log
             exit 1
           fi
@@ -93,26 +85,20 @@ jobs:
           echo "Found Gradle project: $PROJECT_DIR"
           cd "$PROJECT_DIR"
           echo "Working dir: $(pwd)"
-          echo "List files in project root for debugging:"
           ls -la || true
-          echo "List app module files (if present):"
           ls -la app || true
 
-          # set reliable default passwords if secrets not provided (change later)
           KEYSTORE_PASSWORD="${KEYSTORE_PASSWORD:-changeme123}"
           KEY_PASSWORD="${KEY_PASSWORD:-changeme123}"
           KEY_ALIAS="${KEY_ALIAS:-boomingkey}"
 
-          # if KEYSTORE_BASE64 secret provided decode to release-keystore.jks
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Decoding KEYSTORE_BASE64 secret to release-keystore.jks"
             echo "${KEYSTORE_BASE64}" | base64 --decode > release-keystore.jks || true
           fi
 
-          # create keystore if missing
           if [ ! -f release-keystore.jks ]; then
-            echo "No keystore found: creating release-keystore.jks (this will be uploaded as artifact)"
-            # Non-interactive keytool creation
+            echo "No keystore found: creating release-keystore.jks"
             keytool -genkeypair \
               -alias "$KEY_ALIAS" \
               -keyalg RSA -keysize 2048 -validity 10000 \
@@ -125,13 +111,12 @@ jobs:
             echo "Keystore present at $(pwd)/release-keystore.jks"
           fi
 
-          # Write gradle.properties so signingConfig can pick it up
+          # Write gradle.properties (local workspace only)
           echo "KEYSTORE_FILE=$(pwd)/release-keystore.jks" >> gradle.properties
           echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> gradle.properties
           echo "KEY_ALIAS=$KEY_ALIAS" >> gradle.properties
           echo "KEY_PASSWORD=$KEY_PASSWORD" >> gradle.properties
 
-          # ensure gradlew executable and run assembleRelease, capture output
           if [ -f ./gradlew ]; then
             chmod +x ./gradlew
             echo "Running: ./gradlew clean assembleRelease --no-daemon"
@@ -148,7 +133,7 @@ jobs:
           tail -n 200 build.log || true
 
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo "Build failed (exit code $BUILD_EXIT). Uploading logs and artifacts for debugging."
+            echo "Build failed (exit code $BUILD_EXIT)."
             exit $BUILD_EXIT
           fi
         shell: bash
@@ -182,6 +167,7 @@ jobs:
             ls -la release-keystore.jks.base64 || true
           fi
         shell: bash
+
       - name: Upload base64 keystore
         if: always()
         uses: actions/upload-artifact@v4
@@ -189,10 +175,88 @@ jobs:
           name: release-keystore-base64
           path: release-keystore.jks.base64
 
-      - name: Upload release APK(s) if produced
+      - name: Produce a single signed APK artifact (zipalign + apksigner)
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # find installed build-tools dir (pick highest version installed)
+          if [ -d "$ANDROID_SDK_ROOT/build-tools" ]; then
+            BUILD_TOOLS_DIR=$(ls -1d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -n1)
+          else
+            echo "No build-tools found under $ANDROID_SDK_ROOT/build-tools"
+            exit 1
+          fi
+          ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+          echo "Using build-tools: $BUILD_TOOLS_DIR"
+
+          # find release apks
+          mapfile -t APKS < <(find src -type f -name "*release*.apk" -print || true)
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "No release APKs found under src/**/build/outputs/apk/"
+            exit 1
+          fi
+
+          # pick largest APK (best guess for "universal" / main APK)
+          LARGEST_APK="${APKS[0]}"
+          for a in "${APKS[@]}"; do
+            if [ "$(stat -c%s "$a")" -gt "$(stat -c%s "$LARGEST_APK")" ]; then
+              LARGEST_APK="$a"
+            fi
+          done
+          echo "Selected APK: $LARGEST_APK (size: $(stat -c%s "$LARGEST_APK"))"
+
+          mkdir -p dist
+
+          # locate keystore (search workspace)
+          KEYSTORE_PATH=$(find . -maxdepth 6 -type f -name "release-keystore.jks" -print -quit || true)
+          if [ -z "$KEYSTORE_PATH" ]; then
+            echo "No release-keystore.jks found to sign APK. Continuing will fail signature step."
+          else
+            echo "Found keystore at: $KEYSTORE_PATH"
+          fi
+
+          # determine if APK is already signed
+          if [ -x "$APKSIGNER" ]; then
+            if "$APKSIGNER" verify "$LARGEST_APK" >/dev/null 2>&1; then
+              echo "APK appears already signed; copying to dist/"
+              cp "$LARGEST_APK" dist/BoomingMusic-release-signed.apk
+            else
+              # align then sign
+              ALIGNED=dist/aligned.apk
+              if [ -x "$ZIPALIGN" ]; then
+                echo "Running zipalign..."
+                "$ZIPALIGN" -v 4 "$LARGEST_APK" "$ALIGNED" || cp "$LARGEST_APK" "$ALIGNED"
+              else
+                echo "zipalign not found, copying original to aligned.apk"
+                cp "$LARGEST_APK" "$ALIGNED"
+              fi
+
+              if [ -f "$KEYSTORE_PATH" ]; then
+                echo "Signing APK with apksigner..."
+                "$APKSIGNER" sign --ks "$KEYSTORE_PATH" \
+                  --ks-key-alias "${KEY_ALIAS:-boomingkey}" \
+                  --ks-pass pass:"${KEYSTORE_PASSWORD:-changeme123}" \
+                  --key-pass pass:"${KEY_PASSWORD:-changeme123}" \
+                  --out dist/BoomingMusic-release-signed.apk "$ALIGNED"
+              else
+                echo "No keystore available; copying aligned APK as artifact (unsigned)."
+                cp "$ALIGNED" dist/BoomingMusic-release-signed.apk
+              fi
+            fi
+          else
+            echo "apksigner not found; copying selected APK to dist (unsigned)."
+            cp "$LARGEST_APK" dist/BoomingMusic-release-signed.apk
+          fi
+
+          echo "Final artifact:"
+          ls -l dist || true
+        shell: bash
+
+      - name: Upload single signed APK artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: BoomingMusic-Release-APK
-          path: |
-            **/build/outputs/apk/release/*.apk
+          path: dist/BoomingMusic-release-signed.apk
