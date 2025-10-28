@@ -23,7 +23,7 @@ jobs:
           echo "Top-level of src:"
           ls -la src || true
 
-      - name: Inspect src (debug)
+      - name: Inspect src (main)
         run: ls -R src || true
 
       - name: Set up JDK 17
