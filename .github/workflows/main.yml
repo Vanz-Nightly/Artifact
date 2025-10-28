@@ -19,7 +19,7 @@ jobs:
       - name: Unzip BoomingMusic zip
         run: |
           mkdir -p src
-          unzip -q BoomingMusic-1.1.0-rc.4.zip -d src || true
+          unzip -q BoomingMusic-1.1.0-rc.5.zip -d src || true
           echo "Top-level of src:"
           ls -la src || true
 
